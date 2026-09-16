@@ -248,6 +248,95 @@ class GraphQLLocalizationTests(unittest.TestCase):
             finally:
                 tarkov_api._graphql_catalog_cache.pop(("zh", "regular"), None)
 
+    def test_reordered_barters_use_item_signature_not_position(self) -> None:
+        zh = [
+            {
+                "trader": {"id": "trader1", "name": ""},
+                "level": 2,
+                "requiredItems": [{"count": 1, "item": {"id": "req-a", "name": "甲", "shortName": ""}}],
+            },
+            {
+                "trader": {"id": "trader1", "name": ""},
+                "level": 2,
+                "requiredItems": [{"count": 2, "item": {"id": "req-b", "name": "乙", "shortName": ""}}],
+            },
+        ]
+        en = [
+            {
+                "trader": {"id": "trader1", "name": "Trader"},
+                "level": 2,
+                "requiredItems": [{"count": 2, "item": {"id": "req-b", "name": "English B", "shortName": "English B short"}}],
+            },
+            {
+                "trader": {"id": "trader1", "name": "Trader"},
+                "level": 2,
+                "requiredItems": [{"count": 1, "item": {"id": "req-a", "name": "English A", "shortName": "English A short"}}],
+            },
+        ]
+        merged = tarkov_api._merge_barter_rows(zh, en)
+        self.assertEqual(merged[0]["requiredItems"][0]["item"]["shortName"], "English A short")
+        self.assertEqual(merged[1]["requiredItems"][0]["item"]["shortName"], "English B short")
+
+    def test_reordered_crafts_use_station_and_material_signature(self) -> None:
+        zh = [
+            {
+                "station": {"id": "station1", "name": ""},
+                "level": 1,
+                "duration": 60,
+                "requiredItems": [{"count": 1, "item": {"id": "req-a", "name": "甲", "shortName": ""}}],
+            },
+            {
+                "station": {"id": "station1", "name": ""},
+                "level": 1,
+                "duration": 60,
+                "requiredItems": [{"count": 2, "item": {"id": "req-b", "name": "乙", "shortName": ""}}],
+            },
+        ]
+        en = [
+            {
+                "station": {"id": "station1", "name": "Workbench"},
+                "level": 1,
+                "duration": 60,
+                "requiredItems": [{"count": 2, "item": {"id": "req-b", "name": "English B", "shortName": "English B short"}}],
+            },
+            {
+                "station": {"id": "station1", "name": "Workbench"},
+                "level": 1,
+                "duration": 60,
+                "requiredItems": [{"count": 1, "item": {"id": "req-a", "name": "English A", "shortName": "English A short"}}],
+            },
+        ]
+        merged = tarkov_api._merge_craft_rows(zh, en)
+        self.assertEqual(merged[0]["requiredItems"][0]["item"]["shortName"], "English A short")
+        self.assertEqual(merged[1]["requiredItems"][0]["item"]["shortName"], "English B short")
+
+    def test_reordered_vendor_offers_use_vendor_and_price(self) -> None:
+        zh = {
+            "id": "item1",
+            "name": "中文物品",
+            "sellFor": [
+                {"priceRUB": 100, "vendor": {"id": "trader1", "name": ""}},
+                {"priceRUB": 200, "vendor": {"id": "trader1", "name": ""}},
+            ],
+        }
+        en = {
+            "id": "item1",
+            "name": "English Item",
+            "sellFor": [
+                {"priceRUB": 200, "vendor": {"id": "trader1", "name": "High offer"}},
+                {"priceRUB": 100, "vendor": {"id": "trader1", "name": "Low offer"}},
+            ],
+        }
+        merged = tarkov_api._merge_graphql_item(zh, en)
+        offers = {offer["priceRUB"]: offer["vendor"]["name"] for offer in merged["sellFor"]}
+        self.assertEqual(offers, {100: "Low offer", 200: "High offer"})
+
+    def test_item_queries_request_nested_stable_ids(self) -> None:
+        for query in (tarkov_api._QUERY_BY_NAME, tarkov_api._QUERY_ALL_PRICED):
+            self.assertIn("vendor { id name }", query)
+            self.assertIn("trader { id name }", query)
+            self.assertIn("item { id name shortName }", query)
+
     def test_zh_graphql_failure_uses_zh_json_fallback(self) -> None:
         fallback_item = {
             "id": "zh-item",

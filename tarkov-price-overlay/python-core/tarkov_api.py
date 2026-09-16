@@ -52,10 +52,10 @@ query ItemByName($name: String!, $lang: LanguageCode, $gameMode: GameMode) {
     changeLast48hPercent
     sellFor {
       priceRUB
-      vendor { name }
+      vendor { id name }
     }
     bartersFor {
-      trader { name }
+      trader { id name }
       level
       taskUnlock { id name }
       requiredItems {
@@ -64,7 +64,7 @@ query ItemByName($name: String!, $lang: LanguageCode, $gameMode: GameMode) {
       }
     }
     bartersUsing {
-      trader { name }
+      trader { id name }
       level
       taskUnlock { id name }
       rewardItems {
@@ -75,6 +75,7 @@ query ItemByName($name: String!, $lang: LanguageCode, $gameMode: GameMode) {
     buyFor {
       priceRUB
       vendor {
+        id
         name
         ... on TraderOffer { minTraderLevel }
       }
@@ -84,7 +85,7 @@ query ItemByName($name: String!, $lang: LanguageCode, $gameMode: GameMode) {
       name
       minPlayerLevel
       kappaRequired
-      trader { name }
+      trader { id name }
       objectives {
         ... on TaskObjectiveItem {
           type
@@ -190,10 +191,10 @@ query AllItems($lang: LanguageCode, $gameMode: GameMode) {
     changeLast48hPercent
     sellFor {
       priceRUB
-      vendor { name }
+      vendor { id name }
     }
     bartersFor {
-      trader { name }
+      trader { id name }
       level
       taskUnlock { id name }
       requiredItems {
@@ -202,7 +203,7 @@ query AllItems($lang: LanguageCode, $gameMode: GameMode) {
       }
     }
     bartersUsing {
-      trader { name }
+      trader { id name }
       level
       taskUnlock { id name }
       rewardItems {
@@ -213,6 +214,7 @@ query AllItems($lang: LanguageCode, $gameMode: GameMode) {
     buyFor {
       priceRUB
       vendor {
+        id
         name
         ... on TraderOffer { minTraderLevel }
       }
@@ -222,7 +224,7 @@ query AllItems($lang: LanguageCode, $gameMode: GameMode) {
       name
       minPlayerLevel
       kappaRequired
-      trader { name }
+      trader { id name }
       objectives {
         ... on TaskObjectiveItem {
           type
@@ -363,7 +365,7 @@ def _localized_value(value, fallback):
 
 def _merge_named_object(primary: dict | None, fallback: dict | None) -> dict | None:
     if not isinstance(primary, dict):
-        return primary
+        return dict(fallback) if isinstance(fallback, dict) else primary
     merged = dict(primary)
     if isinstance(fallback, dict):
         merged["name"] = _localized_value(primary.get("name"), fallback.get("name"))
@@ -375,7 +377,7 @@ def _merge_named_object(primary: dict | None, fallback: dict | None) -> dict | N
 
 
 def _merge_rows(primary: list, fallback: list, merge_row, identity=None) -> list:
-    """Merge same-shaped GraphQL lists by id, with position as a safe fallback."""
+    """Merge rows by stable identity, with position as a last-resort fallback."""
     if not isinstance(primary, list):
         return primary
     by_identity = {
@@ -394,6 +396,50 @@ def _merge_rows(primary: list, fallback: list, merge_row, identity=None) -> list
             fallback_row = fallback[index]
         merged.append(merge_row(row, fallback_row))
     return merged
+
+
+def _item_list_signature(rows: list) -> tuple:
+    """Return a deterministic signature from item IDs and quantities."""
+    signature = []
+    for row in rows or []:
+        item = row.get("item") if isinstance(row, dict) else None
+        item_id = item.get("id") if isinstance(item, dict) else None
+        count = row.get("count") if isinstance(row, dict) else None
+        if item_id is not None:
+            signature.append((item_id, count))
+    return tuple(sorted(signature))
+
+
+def _barter_identity(row: dict) -> tuple | None:
+    trader_id = (row.get("trader") or {}).get("id")
+    task_id = (row.get("taskUnlock") or {}).get("id")
+    required = _item_list_signature(row.get("requiredItems") or [])
+    rewards = _item_list_signature(row.get("rewardItems") or [])
+    if trader_id is None and task_id is None and not required and not rewards:
+        return None
+    return ("barter", trader_id, row.get("level"), task_id, required, rewards)
+
+
+def _craft_identity(row: dict) -> tuple | None:
+    station_id = (row.get("station") or {}).get("id")
+    required = _item_list_signature(row.get("requiredItems") or [])
+    if station_id is None and not required:
+        return None
+    return (
+        "craft",
+        station_id,
+        row.get("level"),
+        row.get("duration"),
+        required,
+    )
+
+
+def _offer_identity(row: dict) -> tuple | None:
+    vendor_id = (row.get("vendor") or {}).get("id")
+    price = row.get("priceRUB")
+    if vendor_id is None and price is None:
+        return None
+    return ("offer", vendor_id, price)
 
 
 def _merge_item_ref_rows(primary: list, fallback: list) -> list:
@@ -441,15 +487,7 @@ def _merge_barter_rows(primary: list, fallback: list) -> list:
         primary,
         fallback,
         merge,
-        identity=lambda row: (
-            ((row.get("taskUnlock") or {}).get("id"))
-            or (
-                (row.get("trader") or {}).get("id"),
-                row.get("level"),
-            )
-        )
-        if isinstance(row, dict)
-        else None,
+        identity=_barter_identity,
     )
 
 
@@ -482,7 +520,7 @@ def _merge_craft_rows(primary: list, fallback: list) -> list:
             )
         return merged
 
-    return _merge_rows(primary, fallback, merge)
+    return _merge_rows(primary, fallback, merge, identity=_craft_identity)
 
 
 def _merge_graphql_item(primary: dict, fallback: dict | None) -> dict:
@@ -506,9 +544,7 @@ def _merge_graphql_item(primary: dict, fallback: dict | None) -> dict:
                         fallback_row.get("vendor") if isinstance(fallback_row, dict) else None,
                     ),
                 },
-                identity=lambda row: (row.get("vendor") or {}).get("id")
-                if isinstance(row, dict)
-                else None,
+                identity=_offer_identity,
             )
     if "bartersFor" in primary:
         merged["bartersFor"] = _merge_barter_rows(
