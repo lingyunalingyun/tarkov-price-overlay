@@ -1,5 +1,5 @@
 export type Lang = "ko" | "en" | "ru" | "zh";
-export type GameLang = "ko" | "en" | "ru";
+export type GameLang = "ko" | "en" | "ru" | "zh";
 export type GameMode = "regular" | "pve" | "pvp-season";
 
 export const T = {

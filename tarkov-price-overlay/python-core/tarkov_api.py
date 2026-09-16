@@ -2,6 +2,7 @@ import difflib
 import re
 import threading
 import time
+import unicodedata
 
 import requests
 
@@ -428,7 +429,8 @@ _CANON_TABLE = str.maketrans(
 
 
 def _canon(s: str) -> str:
-    return "".join(s.lower().translate(_CANON_TABLE).split())
+    normalized = unicodedata.normalize("NFKC", s)
+    return "".join(normalized.lower().translate(_CANON_TABLE).split())
 
 
 _FLEA_MARKET_NAMES = {"Flea Market", "플리마켓", "Барахолка", "跳蚤市场", "蚤の市"}
@@ -1088,9 +1090,12 @@ def _is_junk_ocr(text: str) -> bool:
     """
     stripped = text.strip()
     n = len(stripped)
-    if n < 2 or n > 80:
+    # Chinese short names can legitimately be one character; keep rejecting
+    # short Latin/symbol fragments as obvious OCR noise.
+    has_cjk = any("\u3400" <= c <= "\u9fff" for c in stripped)
+    if (n < 2 and not has_cjk) or n > 80:
         return True
-    # Need at least one alphabetic char (Latin or Hangul). Anything with
+    # Need at least one alphabetic char (including CJK). Anything with
     # zero letters is reliably noise — separators, digits, punctuation.
     return not any(c.isalpha() or "가" <= c <= "힣" for c in stripped)
 

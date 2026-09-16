@@ -8,6 +8,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { open as openFolderDialog, message, ask } from "@tauri-apps/plugin-dialog";
 import { QRCodeSVG } from "qrcode.react";
 import { T, type Lang, type GameLang, type GameMode } from "./i18n";
+import { resolveGameLang } from "./gameLanguage";
 import "./App.css";
 
 declare const __APP_VERSION__: string;
@@ -891,8 +892,7 @@ async function applyMonitorScaling(force: boolean): Promise<Region | null> {
   }
 }
 
-const getGameLang = (r: Region): GameLang =>
-  r.gameLang ?? (r.lang === "zh" ? "en" : r.lang);
+const getGameLang = (r: Region): GameLang => resolveGameLang(r.lang, r.gameLang);
 
 function loadRegion(): Region {
   try {
@@ -2036,7 +2036,7 @@ function App() {
     localStorage.removeItem(HIDEOUT_LEVELS_KEY);
     setHideoutLevels({});
   };
-  const fetchHideoutStations = async (lang: string) => {
+  const fetchHideoutStations = async (lang: GameLang) => {
     try {
       const res = await fetch(`${PYTHON_API}/hideout/stations?lang=${lang}`);
       if (res.ok) setHideoutStations(await res.json());
@@ -2127,7 +2127,7 @@ function App() {
       const ok = await fetchQuestStatus();
       // Hideout stations ride the same retry cadence — they need the sidecar
       // to be up too, and both are cheap single GET calls.
-      fetchHideoutStations(region.lang);
+      fetchHideoutStations(getGameLang(region));
       if (ok || cancelled) return;
       if (i < delays.length) {
         window.setTimeout(() => tryOnce(i + 1), delays[i]);
@@ -2139,14 +2139,14 @@ function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const currentUiLang = region.lang;
+  const currentGameLang = getGameLang(region);
   useEffect(() => {
     if (showSettings) {
       fetchQuestStatus();
-      fetchHideoutStations(currentUiLang);
+      fetchHideoutStations(currentGameLang);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showSettings, currentUiLang]);
+  }, [showSettings, currentGameLang]);
 
   useEffect(() => {
     // Initial state: card shown briefly so user can position it, then auto-hide.
@@ -3464,6 +3464,7 @@ function App() {
                 value={getGameLang(region)}
                 onChange={(e) => updateRegion("gameLang", e.target.value as GameLang)}
               >
+                <option value="zh">简体中文</option>
                 <option value="ko">한국어</option>
                 <option value="en">English</option>
                 <option value="ru">Русский</option>

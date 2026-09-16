@@ -36,6 +36,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from capture import capture_region
+from game_language import catalog_locale, ocr_languages
 from ocr import (
     _get_reader,
     is_price_or_status_line,
@@ -102,7 +103,7 @@ class CaptureRequest(BaseModel):
     y: int
     width: int
     height: int
-    lang: str = "ko"  # "ko" | "en" | "ru"
+    lang: str = "ko"  # "ko" | "en" | "ru" | "zh"
     game_mode: str = "regular"  # "regular" (PVP) | "pve" | "pvp-season" (시즌 래더)
     mirror_x: int | None = None  # alt capture x (mirrored side), tried if primary doesn't match
     cursor_x: int | None = None  # cursor pos, used to clamp capture to that monitor
@@ -435,7 +436,7 @@ def ammo(lang: str = "en") -> dict:
     """All ammo grouped by caliber, with the matrix-panel stats. Frontend
     fetches once on mount and filters client-side — payload is ~30KB."""
     from tarkov_api import get_ammo
-    return get_ammo(lang)
+    return get_ammo(catalog_locale(lang))
 
 
 @app.get("/diagnostics")
@@ -553,11 +554,9 @@ def _capture_and_lookup(
     t1 = time.perf_counter()
     # Ground labels sit on the game world, not a dark tooltip panel, so the
     # tooltip-background filter would wrongly drop them — skip it for ground.
-    # OCR language set follows the game-client language. The Russian client
-    # shows Cyrillic item names; EasyOCR can't mix Korean + Cyrillic in one
-    # reader, so use ("ru","en") for the RU client and ("ko","en") otherwise
-    # (English client names are Latin and read fine with the ko+en reader).
-    ocr_langs = ("ru", "en") if lang == "ru" else ("ko", "en")
+    # OCR language set follows the game-client language. EasyOCR uses
+    # "ch_sim" for Simplified Chinese; catalog APIs continue to receive "zh".
+    ocr_langs = ocr_languages(lang)
     fragments = recognize_text_fragments(
         image, langs=ocr_langs, skip_bg_filter=(label == "ground")
     )
@@ -795,7 +794,7 @@ def lookup(req: CaptureRequest) -> LookupResponse:
         f"front_cursor=({req.cursor_x},{req.cursor_y}) "
         f"winapi_cursor={winapi_cursor}"
     )
-    lang = req.lang if req.lang in ("ko", "en", "ru") else "ko"
+    lang = catalog_locale(req.lang)
     game_mode = req.game_mode if req.game_mode in ("regular", "pve", "pvp-season") else "regular"
 
     # Direct-name lookup path: skip capture+OCR, use the supplied text.
@@ -990,7 +989,7 @@ def hideout_stations(lang: str = "en") -> list:
     """Return [{id, name, maxLevel}] for all hideout stations.
     Used by the frontend settings panel so users can set their current
     upgrade level per station (to dim already-completed rows on the card)."""
-    return get_station_list(lang)
+    return get_station_list(catalog_locale(lang))
 
 
 @app.get("/quests/status")
