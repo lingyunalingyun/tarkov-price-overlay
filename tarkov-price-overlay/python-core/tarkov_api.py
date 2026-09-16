@@ -60,7 +60,7 @@ query ItemByName($name: String!, $lang: LanguageCode, $gameMode: GameMode) {
       taskUnlock { id name }
       requiredItems {
         count
-        item { name shortName }
+        item { id name shortName }
       }
     }
     bartersUsing {
@@ -69,7 +69,7 @@ query ItemByName($name: String!, $lang: LanguageCode, $gameMode: GameMode) {
       taskUnlock { id name }
       rewardItems {
         count
-        item { name shortName }
+        item { id name shortName }
       }
     }
     buyFor {
@@ -100,7 +100,7 @@ query ItemByName($name: String!, $lang: LanguageCode, $gameMode: GameMode) {
       duration
       requiredItems {
         count
-        item { name shortName }
+        item { id name shortName }
       }
     }
   }
@@ -198,7 +198,7 @@ query AllItems($lang: LanguageCode, $gameMode: GameMode) {
       taskUnlock { id name }
       requiredItems {
         count
-        item { name shortName }
+        item { id name shortName }
       }
     }
     bartersUsing {
@@ -207,7 +207,7 @@ query AllItems($lang: LanguageCode, $gameMode: GameMode) {
       taskUnlock { id name }
       rewardItems {
         count
-        item { name shortName }
+        item { id name shortName }
       }
     }
     buyFor {
@@ -238,7 +238,7 @@ query AllItems($lang: LanguageCode, $gameMode: GameMode) {
       duration
       requiredItems {
         count
-        item { name shortName }
+        item { id name shortName }
       }
     }
   }
@@ -258,6 +258,17 @@ _canon_cache: dict[tuple[str, str], dict[str, dict | None]] = {}
 _price_cache_lock = threading.Lock()
 _refresher_started = False
 _refresher_lock = threading.Lock()
+
+# Raw GraphQL catalogs reused when a localized response needs English field
+# values. The key includes language and game mode so zh fallback never
+# overwrites an existing ko/en/ru dataset.
+_graphql_catalog_cache: dict[tuple[str, str], tuple[float, list[dict]]] = {}
+_graphql_catalog_lock = threading.Lock()
+
+# Raw GraphQL ammo rows reused for the same field-level fallback described
+# above. The final grouped payload remains in _ammo_cache below.
+_graphql_ammo_cache: dict[str, tuple[float, list[dict]]] = {}
+_graphql_ammo_lock = threading.Lock()
 
 # lang -> {item_id -> [{"station": str, "level": int, "count": int}, ...]}
 # Station names are localized (depend on lang); item ids are not. Cached
@@ -343,18 +354,297 @@ def _caliber_display(raw: str) -> str:
     return s
 
 
+def _localized_value(value, fallback):
+    """Keep a non-empty localized value and fill only missing fields."""
+    if value is not None and (not isinstance(value, str) or value.strip()):
+        return value
+    return fallback if fallback is not None else value
+
+
+def _merge_named_object(primary: dict | None, fallback: dict | None) -> dict | None:
+    if not isinstance(primary, dict):
+        return primary
+    merged = dict(primary)
+    if isinstance(fallback, dict):
+        merged["name"] = _localized_value(primary.get("name"), fallback.get("name"))
+        if "shortName" in primary or "shortName" in fallback:
+            merged["shortName"] = _localized_value(
+                primary.get("shortName"), fallback.get("shortName")
+            )
+    return merged
+
+
+def _merge_rows(primary: list, fallback: list, merge_row, identity=None) -> list:
+    """Merge same-shaped GraphQL lists by id, with position as a safe fallback."""
+    if not isinstance(primary, list):
+        return primary
+    by_identity = {
+        identity(row) if identity else row.get("id"): row
+        for row in fallback
+        if isinstance(row, dict) and (identity(row) if identity else row.get("id"))
+    }
+    merged = []
+    for index, row in enumerate(primary):
+        fallback_row = None
+        if isinstance(row, dict):
+            row_identity = identity(row) if identity else row.get("id")
+            if row_identity:
+                fallback_row = by_identity.get(row_identity)
+        if fallback_row is None and index < len(fallback):
+            fallback_row = fallback[index]
+        merged.append(merge_row(row, fallback_row))
+    return merged
+
+
+def _merge_item_ref_rows(primary: list, fallback: list) -> list:
+    def merge(row, fallback_row):
+        if not isinstance(row, dict):
+            return row
+        merged = dict(row)
+        if isinstance(fallback_row, dict):
+            merged["item"] = _merge_named_object(
+                row.get("item"), fallback_row.get("item")
+            )
+        return merged
+
+    return _merge_rows(
+        primary,
+        fallback,
+        merge,
+        identity=lambda row: (row.get("item") or {}).get("id")
+        if isinstance(row, dict)
+        else None,
+    )
+
+
+def _merge_barter_rows(primary: list, fallback: list) -> list:
+    def merge(row, fallback_row):
+        if not isinstance(row, dict):
+            return row
+        merged = dict(row)
+        if not isinstance(fallback_row, dict):
+            return merged
+        merged["trader"] = _merge_named_object(
+            row.get("trader"), fallback_row.get("trader")
+        )
+        merged["taskUnlock"] = _merge_named_object(
+            row.get("taskUnlock"), fallback_row.get("taskUnlock")
+        )
+        item_field = "requiredItems" if "requiredItems" in row else "rewardItems"
+        if item_field in row:
+            merged[item_field] = _merge_item_ref_rows(
+                row.get(item_field) or [], fallback_row.get(item_field) or []
+            )
+        return merged
+
+    return _merge_rows(
+        primary,
+        fallback,
+        merge,
+        identity=lambda row: (
+            ((row.get("taskUnlock") or {}).get("id"))
+            or (
+                (row.get("trader") or {}).get("id"),
+                row.get("level"),
+            )
+        )
+        if isinstance(row, dict)
+        else None,
+    )
+
+
+def _merge_task_rows(primary: list, fallback: list) -> list:
+    def merge(row, fallback_row):
+        if not isinstance(row, dict):
+            return row
+        merged = dict(row)
+        if isinstance(fallback_row, dict):
+            merged["name"] = _localized_value(row.get("name"), fallback_row.get("name"))
+            merged["trader"] = _merge_named_object(
+                row.get("trader"), fallback_row.get("trader")
+            )
+        return merged
+
+    return _merge_rows(primary, fallback, merge)
+
+
+def _merge_craft_rows(primary: list, fallback: list) -> list:
+    def merge(row, fallback_row):
+        if not isinstance(row, dict):
+            return row
+        merged = dict(row)
+        if isinstance(fallback_row, dict):
+            merged["station"] = _merge_named_object(
+                row.get("station"), fallback_row.get("station")
+            )
+            merged["requiredItems"] = _merge_item_ref_rows(
+                row.get("requiredItems") or [], fallback_row.get("requiredItems") or []
+            )
+        return merged
+
+    return _merge_rows(primary, fallback, merge)
+
+
+def _merge_graphql_item(primary: dict, fallback: dict | None) -> dict:
+    if not isinstance(fallback, dict):
+        return primary
+    merged = dict(primary)
+    for field in ("name", "shortName"):
+        merged[field] = _localized_value(primary.get(field), fallback.get(field))
+    if "containsItems" in primary:
+        merged["containsItems"] = _merge_item_ref_rows(
+            primary.get("containsItems") or [], fallback.get("containsItems") or []
+        )
+    for field in ("sellFor", "buyFor"):
+        if field in primary:
+            merged[field] = _merge_rows(
+                primary.get(field) or [], fallback.get(field) or [],
+                lambda row, fallback_row: {
+                    **row,
+                    "vendor": _merge_named_object(
+                        row.get("vendor"),
+                        fallback_row.get("vendor") if isinstance(fallback_row, dict) else None,
+                    ),
+                },
+                identity=lambda row: (row.get("vendor") or {}).get("id")
+                if isinstance(row, dict)
+                else None,
+            )
+    if "bartersFor" in primary:
+        merged["bartersFor"] = _merge_barter_rows(
+            primary.get("bartersFor") or [], fallback.get("bartersFor") or []
+        )
+    if "bartersUsing" in primary:
+        merged["bartersUsing"] = _merge_barter_rows(
+            primary.get("bartersUsing") or [], fallback.get("bartersUsing") or []
+        )
+    if "usedInTasks" in primary:
+        merged["usedInTasks"] = _merge_task_rows(
+            primary.get("usedInTasks") or [], fallback.get("usedInTasks") or []
+        )
+    if "craftsFor" in primary:
+        merged["craftsFor"] = _merge_craft_rows(
+            primary.get("craftsFor") or [], fallback.get("craftsFor") or []
+        )
+    return merged
+
+
+def _merge_graphql_catalog(primary: list[dict], fallback: list[dict]) -> list[dict]:
+    fallback_by_id = {
+        item.get("id"): item
+        for item in fallback
+        if isinstance(item, dict) and item.get("id")
+    }
+    return [
+        _merge_graphql_item(item, fallback_by_id.get(item.get("id")))
+        for item in primary
+    ]
+
+
+def _has_missing_localized_field(value) -> bool:
+    if isinstance(value, dict):
+        for field in ("name", "shortName"):
+            if field in value and not _localized_value(value.get(field), None):
+                return True
+        return any(_has_missing_localized_field(child) for child in value.values())
+    if isinstance(value, list):
+        return any(_has_missing_localized_field(child) for child in value)
+    return False
+
+
+def _fetch_graphql_catalog(lang: str, game_mode: str, use_cache: bool = False) -> list[dict]:
+    key = (lang, game_mode)
+    if use_cache:
+        with _graphql_catalog_lock:
+            cached = _graphql_catalog_cache.get(key)
+        if cached and time.time() - cached[0] < CACHE_TTL_SEC:
+            return cached[1]
+    response = requests.post(
+        TARKOV_API_URL,
+        json={"query": _QUERY_ALL_PRICED, "variables": {"lang": lang, "gameMode": game_mode}},
+        timeout=30,
+    )
+    response.raise_for_status()
+    items = response.json().get("data", {}).get("items", []) or []
+    if not items:
+        raise RuntimeError("GraphQL returned an empty item list")
+    with _graphql_catalog_lock:
+        _graphql_catalog_cache[key] = (time.time(), items)
+    return items
+
+
+def _localized_graphql_catalog(items: list[dict], lang: str, game_mode: str) -> list[dict]:
+    if lang != "zh" or not _has_missing_localized_field(items):
+        return items
+    try:
+        english = _fetch_graphql_catalog("en", game_mode, use_cache=True)
+        return _merge_graphql_catalog(items, english)
+    except Exception as e:
+        print(f"[cache] GraphQL English field fallback failed ({game_mode}): {e!r}")
+        return items
+
+
+def _fetch_graphql_ammo(lang: str, use_cache: bool = False) -> list[dict]:
+    if use_cache:
+        with _graphql_ammo_lock:
+            cached = _graphql_ammo_cache.get(lang)
+        if cached and time.time() - cached[0] < CACHE_TTL_SEC:
+            return cached[1]
+    response = requests.post(
+        TARKOV_API_URL,
+        json={"query": _QUERY_AMMO, "variables": {"lang": lang}},
+        timeout=20,
+    )
+    response.raise_for_status()
+    rows = (response.json().get("data") or {}).get("ammo") or []
+    with _graphql_ammo_lock:
+        _graphql_ammo_cache[lang] = (time.time(), rows)
+    return rows
+
+
+def _merge_graphql_ammo(primary: list[dict], fallback: list[dict]) -> list[dict]:
+    fallback_by_id = {
+        (row.get("item") or {}).get("id"): row
+        for row in fallback
+        if isinstance(row, dict) and (row.get("item") or {}).get("id")
+    }
+    merged = []
+    for index, row in enumerate(primary):
+        fallback_row = fallback_by_id.get((row.get("item") or {}).get("id"))
+        if fallback_row is None and index < len(fallback):
+            fallback_row = fallback[index]
+        item = row.get("item") or {}
+        fallback_item = (fallback_row or {}).get("item") or {}
+        merged.append({
+            **row,
+            "item": {
+                **item,
+                "name": _localized_value(item.get("name"), fallback_item.get("name")),
+                "shortName": _localized_value(
+                    item.get("shortName"), fallback_item.get("shortName")
+                ),
+            },
+        })
+    return merged
+
+
 def _fetch_ammo(lang: str) -> dict:
     """Pulls every ammo entry from tarkov.dev and groups by caliber.
     Returns {"calibers": {caliber_raw: {display, rounds: [...]}}}.
     Empty dict on any failure so the frontend can degrade gracefully."""
     try:
-        response = requests.post(
-            TARKOV_API_URL,
-            json={"query": _QUERY_AMMO, "variables": {"lang": lang}},
-            timeout=20,
-        )
-        response.raise_for_status()
-        rows = (response.json().get("data") or {}).get("ammo") or []
+        rows = _fetch_graphql_ammo(lang)
+        if lang == "zh" and any(
+            not (row.get("item") or {}).get("name")
+            or not (row.get("item") or {}).get("shortName")
+            for row in rows
+        ):
+            try:
+                rows = _merge_graphql_ammo(
+                    rows, _fetch_graphql_ammo("en", use_cache=True)
+                )
+            except Exception as e:
+                print(f"[ammo] GraphQL English field fallback failed: {e!r}")
     except Exception as e:
         # GraphQL이 죽어 있으면(2026-07~ 장기 장애) json 폴백에서 같은 행 모양을
         # 뽑아온다. 이게 없어서 탄약 매트릭스만 장애 내내 비어 있었고 사용자
@@ -452,6 +742,36 @@ def _fetch_hideout_index(lang: str) -> tuple[dict[str, list[dict]], list[dict]]:
     )
     response.raise_for_status()
     stations = response.json().get("data", {}).get("hideoutStations", []) or []
+    if lang == "zh" and any(not s.get("name") for s in stations if isinstance(s, dict)):
+        try:
+            english_response = requests.post(
+                TARKOV_API_URL,
+                json={"query": _QUERY_HIDEOUT_STATIONS, "variables": {"lang": "en"}},
+                timeout=20,
+            )
+            english_response.raise_for_status()
+            english_stations = (
+                english_response.json().get("data", {}).get("hideoutStations", []) or []
+            )
+            english_by_id = {
+                s.get("id"): s
+                for s in english_stations
+                if isinstance(s, dict) and s.get("id")
+            }
+            stations = [
+                {
+                    **station,
+                    "name": _localized_value(
+                        station.get("name"),
+                        english_by_id.get(station.get("id"), {}).get("name"),
+                    ),
+                }
+                if isinstance(station, dict)
+                else station
+                for station in stations
+            ]
+        except Exception as e:
+            print(f"[hideout] GraphQL English field fallback failed: {e!r}")
     index: dict[str, list[dict]] = {}
     station_list: list[dict] = []
     for s in stations:
@@ -778,18 +1098,8 @@ def _refresh_one(lang: str, game_mode: str) -> int:
             # enum에 없다 — json.tarkov.dev(/pvp-season/*)가 유일한 공급원.
             # raise로 아래 폴백 경로(다른 장애와 동일 경로)로 라우팅한다.
             raise RuntimeError("pvp-season is served by json.tarkov.dev only")
-        response = requests.post(
-            TARKOV_API_URL,
-            json={
-                "query": _QUERY_ALL_PRICED,
-                "variables": {"lang": lang, "gameMode": game_mode},
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        items = response.json().get("data", {}).get("items", []) or []
-        if not items:
-            raise RuntimeError("GraphQL returned an empty item list")
+        items = _fetch_graphql_catalog(lang, game_mode)
+        items = _localized_graphql_catalog(items, lang, game_mode)
     except Exception as e:
         print(f"[cache] GraphQL failed for ({lang},{game_mode}): {e!r} - trying json.tarkov.dev fallback")
         import tarkov_json_fallback
@@ -953,7 +1263,8 @@ def _query_by_name(name: str, lang: str, game_mode: str) -> list[dict]:
         timeout=10,
     )
     response.raise_for_status()
-    return response.json().get("data", {}).get("items", [])
+    items = response.json().get("data", {}).get("items", []) or []
+    return _localized_graphql_catalog(items, lang, game_mode)
 
 
 def _empty_result(matched_from: str | None = None) -> dict:
