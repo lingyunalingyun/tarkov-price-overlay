@@ -1116,6 +1116,61 @@ def _build_cache_entry(item: dict, hideout_idx: dict[str, list[dict]]) -> dict:
     }
 
 
+def _add_zh_matching_aliases(
+    by_name: dict[str, dict],
+    zh_items: list[dict],
+    english_items: list[dict],
+    entries_by_id: dict[str, dict],
+) -> None:
+    """Add English and localized short-name aliases to the zh display cache.
+
+    The values in ``by_name`` are always the entries built from ``zh_items``;
+    English rows only contribute matching keys. Full-name keys are installed
+    before short-name aliases so a short-name collision can never shadow a
+    canonical full name.
+    """
+    english_by_id = {
+        item.get("id"): item
+        for item in english_items
+        if isinstance(item, dict) and item.get("id")
+    }
+
+    # English full names are exact aliases, but never replace an existing zh
+    # full name (including another item's full name).
+    for item in zh_items:
+        if not isinstance(item, dict):
+            continue
+        entry = entries_by_id.get(item.get("id"))
+        english = english_by_id.get(item.get("id"))
+        if entry is None or english is None:
+            continue
+        alias = (english.get("name") or "").strip()
+        if alias and alias not in by_name:
+            by_name[alias] = entry
+
+    # Keep the existing gun-first collision policy for both localized and
+    # English short names. Full-name aliases above already occupy their keys.
+    alias_pick: dict[str, tuple[bool, dict]] = {}
+    for item in zh_items:
+        if not isinstance(item, dict):
+            continue
+        entry = entries_by_id.get(item.get("id"))
+        if entry is None:
+            continue
+        english = english_by_id.get(item.get("id")) or {}
+        is_gun = "gun" in (item.get("types") or [])
+        for short in (item.get("shortName"), english.get("shortName")):
+            short = (short or "").strip()
+            if not short:
+                continue
+            current = alias_pick.get(short)
+            if current is None or (is_gun and not current[0]):
+                alias_pick[short] = (is_gun, entry)
+    for short, (_is_gun, entry) in alias_pick.items():
+        if short not in by_name:
+            by_name[short] = entry
+
+
 def _refresh_one(lang: str, game_mode: str) -> int:
     # Primary source: tarkov.dev GraphQL. When it's down (the 2026-07 multi-day
     # 503 "GraphQL server unavailable", the-hideout/tarkov-api#474), fall back to
@@ -1124,6 +1179,7 @@ def _refresh_one(lang: str, game_mode: str) -> int:
     # this function (entry build, alias, canon) is unchanged. (v1.2.4부터
     # 폴백도 바터/퀘스트/제작/은신처 enrichment full parity — 과거 주석 정정.)
     source = "graphql"
+    english_items: list[dict] = []
     # Set only on the fallback path: the JSON source supplies the hideout index
     # itself, so we must not fall through to the (also-unreachable) GraphQL
     # hideout query below and blank the panel.
@@ -1142,6 +1198,18 @@ def _refresh_one(lang: str, game_mode: str) -> int:
         items, fb_idx, fb_stations = tarkov_json_fallback.fetch_catalog(lang, game_mode)
         fb_hideout = (fb_idx, fb_stations)
         source = "json-fallback"
+    if lang == "zh":
+        try:
+            if source == "graphql":
+                # The English rows are matching aliases only. Reuse the
+                # language-keyed GraphQL cache when it is already populated.
+                english_items = _fetch_graphql_catalog("en", game_mode, use_cache=True)
+            else:
+                # JSON fallback has the same stable item IDs and localized
+                # locale files, so it can provide aliases without live GraphQL.
+                english_items = tarkov_json_fallback.fetch_item_names("en", game_mode)
+        except Exception as e:
+            print(f"[cache] English matching aliases unavailable ({game_mode}): {e!r}")
     # Refresh the lang's hideout index alongside prices so cached entries
     # always have the latest "needed for upgrade" mapping baked in. On the
     # fallback path it arrived with the catalog; otherwise it's its own
@@ -1162,11 +1230,15 @@ def _refresh_one(lang: str, game_mode: str) -> int:
             with _hideout_index_lock:
                 hideout_idx = _hideout_index_cache.get(lang, {})
     by_name: dict[str, dict] = {}
+    entries_by_id: dict[str, dict] = {}
     for it in items:
         name = it.get("name")
         if not name:
             continue
-        by_name[name] = _build_cache_entry(it, hideout_idx)
+        entry = _build_cache_entry(it, hideout_idx)
+        by_name[name] = entry
+        if it.get("id"):
+            entries_by_id[it["id"]] = entry
     # Alias by shortName too so ground-pickup / inventory-full ("공간 부족
     # (MP9)") OCR matches the same entry as the full inventory name. Short
     # names COLLIDE across items — e.g. ko "MP9" is shared by the B&T MP9 gun,
@@ -1177,21 +1249,24 @@ def _refresh_one(lang: str, game_mode: str) -> int:
     # bare "MP9"-style label is far more often the weapon than one of its
     # mods); among equals, first write wins. A full catalog name is never
     # shadowed by an alias.
-    alias_pick: dict[str, tuple[bool, str]] = {}  # short -> (is_gun, full_name)
-    for it in items:
-        name = it.get("name")
-        if not name:
-            continue
-        short = (it.get("shortName") or "").strip()
-        if not short or short == name:
-            continue
-        is_gun = "gun" in (it.get("types") or [])
-        cur = alias_pick.get(short)
-        if cur is None or (is_gun and not cur[0]):
-            alias_pick[short] = (is_gun, name)
-    for short, (_is_gun, full_name) in alias_pick.items():
-        if short not in by_name:
-            by_name[short] = by_name[full_name]
+    if lang == "zh":
+        _add_zh_matching_aliases(by_name, items, english_items, entries_by_id)
+    else:
+        alias_pick: dict[str, tuple[bool, str]] = {}  # short -> (is_gun, full_name)
+        for it in items:
+            name = it.get("name")
+            if not name:
+                continue
+            short = (it.get("shortName") or "").strip()
+            if not short or short == name:
+                continue
+            is_gun = "gun" in (it.get("types") or [])
+            cur = alias_pick.get(short)
+            if cur is None or (is_gun and not cur[0]):
+                alias_pick[short] = (is_gun, name)
+        for short, (_is_gun, full_name) in alias_pick.items():
+            if short not in by_name:
+                by_name[short] = by_name[full_name]
     # Canonical (OCR-confusion-folded) index for the last-resort exact match.
     # Built once per refresh so the hot path pays a single dict lookup.
     canon_map: dict[str, dict | None] = {}

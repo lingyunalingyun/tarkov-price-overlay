@@ -269,6 +269,39 @@ def _build_enrichments(mode: str, lang: str, en_loc: dict, item_loc: dict,
     return out
 
 
+def fetch_item_names(lang: str, game_mode: str) -> list[dict]:
+    """Return stable item IDs with localized name and shortName fields.
+
+    This intentionally avoids the enrichment datasets used by
+    :func:`fetch_catalog`; callers use it when they need a companion catalog
+    for matching aliases without building a second display catalog.
+    """
+    mode = game_mode if game_mode in ("pve", "pvp-season") else "regular"
+    items_doc = _get_cached(f"{mode}/items")
+    items = ((items_doc.get("data") or {}).get("items")) or {}
+    if not items:
+        raise RuntimeError("json.tarkov.dev returned no items")
+
+    item_loc = _get_locale(f"{mode}/items_{lang}")
+    en_loc = item_loc if lang == "en" else _get_locale(f"{mode}/items_en")
+
+    def loc(key):
+        if key is None:
+            return None
+        value = item_loc.get(key) or en_loc.get(key) or key
+        return value.strip() if isinstance(value, str) else value
+
+    return [
+        {
+            "id": item.get("id") or item_id,
+            "name": loc(item.get("name")),
+            "shortName": loc(item.get("shortName")),
+        }
+        for item_id, item in items.items()
+        if isinstance(item, dict) and (item.get("id") or item_id)
+    ]
+
+
 def fetch_catalog(lang: str, game_mode: str) -> tuple[list[dict], dict, list[dict]]:
     """Fetch the whole catalog from json.tarkov.dev.
 

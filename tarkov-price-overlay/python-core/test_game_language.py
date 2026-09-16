@@ -350,10 +350,16 @@ class GraphQLLocalizationTests(unittest.TestCase):
                  tarkov_json_fallback,
                  "fetch_catalog",
                  return_value=([fallback_item], {}, []),
-             ) as fetch:
+             ) as fetch, \
+             patch.object(
+                 tarkov_json_fallback,
+                 "fetch_item_names",
+                 return_value=[],
+             ) as fetch_names:
             try:
                 tarkov_api._refresh_one("zh", "regular")
                 fetch.assert_called_once_with("zh", "regular")
+                fetch_names.assert_called_once_with("en", "regular")
                 self.assertIn(("zh", "regular"), tarkov_api._price_cache)
                 self.assertNotIn(("en", "regular"), tarkov_api._price_cache)
             finally:
@@ -423,6 +429,95 @@ class GraphQLLocalizationTests(unittest.TestCase):
         ):
             self.assertEqual(tarkov_api._price_cache[("en", "regular")], {"English": {}})
             self.assertEqual(tarkov_api._price_cache[("zh", "regular")], {"中文": {}})
+
+
+class ChineseMatchingAliasTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        for cache in (
+            tarkov_api._price_cache,
+            tarkov_api._canon_cache,
+            tarkov_api._price_cache_ts,
+            tarkov_api._hideout_index_cache,
+            tarkov_api._hideout_station_list_cache,
+        ):
+            cache.pop(("zh", "regular"), None)
+        tarkov_api._names_cache.pop("zh", None)
+
+    @staticmethod
+    def _item(item_id: str, name: str, short_name: str, types=None) -> dict:
+        return {
+            "id": item_id,
+            "name": name,
+            "shortName": short_name,
+            "types": types or [],
+            "properties": {},
+            "sellFor": [],
+        }
+
+    def _refresh_graphql(self, zh_items: list[dict], english_items: list[dict]) -> dict:
+        def fetch(lang: str, game_mode: str, use_cache: bool = False) -> list[dict]:
+            return zh_items if lang == "zh" else english_items
+
+        with patch.object(tarkov_api, "_fetch_graphql_catalog", side_effect=fetch), \
+             patch.object(tarkov_api, "_fetch_hideout_index", return_value=({}, [])):
+            tarkov_api._refresh_one("zh", "regular")
+        return tarkov_api._price_cache[("zh", "regular")]
+
+    def test_english_full_name_alias_returns_zh_entry(self) -> None:
+        zh = [self._item("armor", "6B2防弹衣（Flora）", "6B2护甲", ["armor"])]
+        en = [self._item("armor", "6B2 body armor (Flora)", "6B2 body armor", ["armor"])]
+
+        cache = self._refresh_graphql(zh, en)
+
+        self.assertEqual(cache["6B2 body armor (Flora)"]["name"], "6B2防弹衣（Flora）")
+        self.assertIs(cache["6B2 body armor (Flora)"], cache["6B2防弹衣（Flora）"])
+
+    def test_english_short_name_alias_returns_same_zh_entry(self) -> None:
+        zh = [self._item("armor", "6B2防弹衣（Flora）", "6B2护甲", ["armor"])]
+        en = [self._item("armor", "6B2 body armor (Flora)", "6B2 body armor", ["armor"])]
+
+        cache = self._refresh_graphql(zh, en)
+
+        self.assertEqual(cache["6B2 body armor"]["name"], "6B2防弹衣（Flora）")
+        self.assertIs(cache["6B2 body armor"], cache["6B2防弹衣（Flora）"])
+
+    def test_full_names_and_english_canonical_alias_share_entry(self) -> None:
+        zh = [self._item("armor", "6B2防弹衣（Flora）", "6B2护甲", ["armor"])]
+        en = [self._item("armor", "6B2 body armor (Flora)", "6B2 body armor", ["armor"])]
+
+        cache = self._refresh_graphql(zh, en)
+
+        result = tarkov_api._cache_lookup("GBZ body armor (Flora)", "zh", "regular", None)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["name"], "6B2防弹衣（Flora）")
+        self.assertIs(cache["6B2 body armor (Flora)"], cache["6B2防弹衣（Flora）"])
+
+    def test_json_fallback_builds_english_aliases_by_stable_id(self) -> None:
+        zh = [self._item("armor", "6B2防弹衣（Flora）", "6B2护甲", ["armor"])]
+        en = [self._item("armor", "6B2 body armor (Flora)", "6B2 body armor", ["armor"])]
+        with patch.object(tarkov_api, "_fetch_graphql_catalog", side_effect=RuntimeError("offline")), \
+             patch.object(tarkov_json_fallback, "fetch_catalog", return_value=(zh, {}, [])), \
+             patch.object(tarkov_json_fallback, "fetch_item_names", return_value=en):
+            tarkov_api._refresh_one("zh", "regular")
+
+        result = tarkov_api._cache_lookup("6B2 body armor (Flora)", "zh", "regular", None)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["name"], "6B2防弹衣（Flora）")
+
+    def test_english_alias_does_not_replace_another_zh_full_name(self) -> None:
+        zh = [
+            self._item("first", "中文物品一", "短名一"),
+            self._item("second", "中文物品二", "短名二"),
+        ]
+        en = [
+            self._item("first", "中文物品二", "English One"),
+            self._item("second", "English Two", "English Two Short"),
+        ]
+
+        cache = self._refresh_graphql(zh, en)
+
+        self.assertEqual(cache["中文物品二"]["id"], "second")
+        self.assertEqual(cache["English Two"]["id"], "second")
 
 
 if __name__ == "__main__":
