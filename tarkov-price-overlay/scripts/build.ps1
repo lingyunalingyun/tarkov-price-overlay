@@ -108,7 +108,13 @@ if ($SkipPython) {
         & $venvPython -m pip install pyinstaller
     }
 
-    # 2) PyInstaller bundle
+    # 2) Prepare and verify all EasyOCR models before PyInstaller bundles the
+    # model directory. This is build-time only; the frozen sidecar disables
+    # EasyOCR's runtime downloads.
+    Write-Host "[build] preparing EasyOCR models..."
+    & $venvPython "$root\scripts\prepare_ocr_models.py"
+
+    # 3) PyInstaller bundle
     Write-Host "[build] running PyInstaller..."
     $distPython = "$root\dist-python"
     Remove-DirWithRetry $distPython
@@ -122,7 +128,7 @@ if ($SkipPython) {
         throw "PyInstaller did not produce $serverExe. Check the build log above."
     }
 
-    # 3) Copy PyInstaller --onedir output into src-tauri\binaries\
+    # 4) Copy PyInstaller --onedir output into src-tauri\binaries\
     Write-Host "[build] staging sidecar files into src-tauri\binaries"
     Remove-DirWithRetry $staged
     New-Item -ItemType Directory -Force -Path $staged | Out-Null

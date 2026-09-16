@@ -31,8 +31,16 @@ for pkg in ("easyocr", "torch", "torchvision"):
         # torchvision is optional; ignore if not installed
         pass
 
-# OCR model files (already migrated into python-core/models/easyocr/)
-datas += [("python-core/models/easyocr", "models/easyocr")]
+# OCR model files are prepared by scripts/prepare_ocr_models.py before this
+# spec runs. Fail early with an actionable message rather than producing a
+# package that downloads models on first use.
+ocr_model_dir = os.path.join(SPECPATH, "python-core", "models", "easyocr")
+if not os.path.isdir(ocr_model_dir):
+    raise FileNotFoundError(
+        f"OCR model directory missing: {ocr_model_dir}. "
+        "Run scripts\\prepare_ocr_models.py first."
+    )
+datas += [(ocr_model_dir, "models/easyocr")]
 
 
 a = Analysis(

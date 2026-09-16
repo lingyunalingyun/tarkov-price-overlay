@@ -31,6 +31,16 @@
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 ```
 
+### OCR models and offline packaging
+
+`scripts\build.ps1` runs `scripts\prepare_ocr_models.py` before PyInstaller.
+It downloads and verifies the EasyOCR detector plus the Korean, Cyrillic, and
+Simplified Chinese recognition models into `python-core\models\easyocr\`.
+That directory is ignored by Git and is included in the packaged sidecar by
+`tarkov-server.spec`. The frozen sidecar disables runtime model downloads, so
+the packaged release works offline after installation. Source checkouts may
+still let EasyOCR download a missing model on first use.
+
 스크립트가 하는 일:
 1. venv에 의존성 + PyInstaller 설치
 2. `tarkov-server.spec`로 Python 서버를 `dist-python/tarkov-server/`에 패키징

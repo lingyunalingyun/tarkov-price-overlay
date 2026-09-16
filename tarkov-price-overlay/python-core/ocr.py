@@ -6,6 +6,7 @@ import sys
 import cv2
 import easyocr
 import numpy as np
+from ocr_models import model_diagnostic
 
 
 def _resource_base() -> str:
@@ -46,14 +47,39 @@ _migrate_legacy_models()
 _readers: dict[tuple[str, ...], easyocr.Reader] = {}
 
 
+def _is_packaged() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+class OCRModelUnavailableError(RuntimeError):
+    """Raised when a packaged OCR model cannot be loaded."""
+
+
 def _get_reader(langs: tuple[str, ...]) -> easyocr.Reader:
     if langs not in _readers:
         print(f"[ocr] loading reader langs={langs} from {MODEL_DIR}")
-        _readers[langs] = easyocr.Reader(
-            list(langs),
-            gpu=False,
-            model_storage_directory=MODEL_DIR,
-        )
+        packaged = _is_packaged()
+        if packaged:
+            diagnostic = model_diagnostic(MODEL_DIR, langs)
+            if diagnostic:
+                print(f"[ocr] {diagnostic}", file=sys.stderr)
+                raise OCRModelUnavailableError(diagnostic)
+        try:
+            _readers[langs] = easyocr.Reader(
+                list(langs),
+                gpu=False,
+                model_storage_directory=MODEL_DIR,
+                download_enabled=not packaged,
+            )
+        except Exception as exc:
+            if packaged:
+                diagnostic = (
+                    f"Packaged OCR model failed to load for langs={langs} "
+                    f"from {MODEL_DIR}: {exc}"
+                )
+                print(f"[ocr] {diagnostic}", file=sys.stderr)
+                raise OCRModelUnavailableError(diagnostic) from exc
+            raise
         print(f"[ocr] reader ready for langs={langs}")
     return _readers[langs]
 
@@ -219,7 +245,13 @@ def recognize_text_fragments(
     concrete, sky), so the filter would reject the real label as "not a
     tooltip". For ground we keep every non-empty fragment and let the
     length-based candidate scoring downstream pick the item name."""
-    reader = _get_reader(langs)
+    try:
+        reader = _get_reader(langs)
+    except OCRModelUnavailableError:
+        # A packaged model problem must not take down the sidecar. Keep the
+        # failure visible in the sidecar log and let the normal no-match path
+        # return a useful response to the UI. Never substitute another reader.
+        return []
     gray = _to_gray(image)
     # detail=1 returns (bbox, text, confidence) so we can sample the
     # surrounding pixels per text region. paragraph=False keeps each
