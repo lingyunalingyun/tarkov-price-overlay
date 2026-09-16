@@ -25,6 +25,23 @@ const ANNOUNCE_SEEN_KEY = "tarkov.announceSeen";
 // Hideout levels: {[stationId]: currentLevel}. Persisted across sessions.
 const HIDEOUT_LEVELS_KEY = "tarkov.hideoutLevels";
 
+type RemoteAnnouncement = { id: number; ko: string; en: string; ru: string };
+
+function getRemoteAnnouncementText(
+  lang: Lang,
+  announcement: RemoteAnnouncement
+): string {
+  switch (lang) {
+    case "ko":
+      return announcement.ko || announcement.en;
+    case "ru":
+      return announcement.ru || announcement.en || announcement.ko;
+    case "en":
+    case "zh":
+      return announcement.en || announcement.ko;
+  }
+}
+
 function loadAutoCheckUpdate(): boolean {
   const v = localStorage.getItem(UPDATE_CHECK_KEY);
   return v == null ? true : v === "true";
@@ -1137,9 +1154,8 @@ function App() {
     () => localStorage.getItem(ADMIN_BANNER_DISMISS_KEY) === "true"
   );
   // Server-driven announcement to show on launch (null = nothing to show).
-  const [remoteAnnounce, setRemoteAnnounce] = useState<
-    { id: number; ko: string; en: string; ru: string } | null
-  >(null);
+  const [remoteAnnounce, setRemoteAnnounce] =
+    useState<RemoteAnnouncement | null>(null);
   // Anonymous stats are opt-out: enabled by default, with a one-time
   // informational notice (not a blocking consent gate).
   const [statsEnabled, setStatsEnabled] = useState<boolean>(loadStatsEnabled);
@@ -1759,6 +1775,9 @@ function App() {
   }, [cardVisible]);
 
   const t = T[region.lang];
+  const announcementText = remoteAnnounce
+    ? getRemoteAnnouncementText(region.lang, remoteAnnounce)
+    : "";
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(region));
@@ -3133,29 +3152,20 @@ function App() {
           </div>
         )}
 
-        {remoteAnnounce &&
-          (region.lang === "ko"
-            ? remoteAnnounce.ko || remoteAnnounce.en
-            : region.lang === "ru"
-              ? remoteAnnounce.ru || remoteAnnounce.en || remoteAnnounce.ko
-              : remoteAnnounce.en) && (
-            <div className="announce-banner">
-              <span className="announce-text">
-                {region.lang === "ko"
-                  ? remoteAnnounce.ko || remoteAnnounce.en
-                  : region.lang === "ru"
-                    ? remoteAnnounce.ru || remoteAnnounce.en || remoteAnnounce.ko
-                    : remoteAnnounce.en}
-              </span>
-              <button
-                className="settings-btn"
-                onClick={() => setRemoteAnnounce(null)}
-                title={t.dismiss}
-              >
-                ✕
-              </button>
-            </div>
-          )}
+        {announcementText && (
+          <div className="announce-banner">
+            <span className="announce-text">
+              {announcementText}
+            </span>
+            <button
+              className="settings-btn"
+              onClick={() => setRemoteAnnounce(null)}
+              title={t.dismiss}
+            >
+              ✕
+            </button>
+          </div>
+        )}
 
         {historyVisible && (
           <div className="history-panel">
