@@ -7,7 +7,7 @@ GameLang = Literal["ko", "en", "ru", "zh"]
 
 _OCR_LANGUAGES: dict[GameLang, tuple[str, ...]] = {
     "ko": ("ko", "en"),
-    "en": ("en",),
+    "en": ("ko", "en"),
     "ru": ("ru", "en"),
     "zh": ("ch_sim", "en"),
 }

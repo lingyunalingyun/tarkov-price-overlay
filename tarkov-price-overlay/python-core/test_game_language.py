@@ -11,6 +11,9 @@ class GameLanguageTests(unittest.TestCase):
     def test_zh_uses_simplified_chinese_easyocr(self) -> None:
         self.assertEqual(ocr_languages("zh"), ("ch_sim", "en"))
 
+    def test_en_reuses_the_warmed_ko_en_reader(self) -> None:
+        self.assertEqual(ocr_languages("en"), ("ko", "en"))
+
     def test_zh_catalog_locale_stays_zh(self) -> None:
         self.assertEqual(catalog_locale("zh"), "zh")
         self.assertNotIn("ch_sim", catalog_locale("zh"))
